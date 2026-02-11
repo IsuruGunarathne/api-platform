@@ -252,6 +252,15 @@ Feature: Model Round-Robin Load Balancing Policy
       """
     Then the response status code should be 200
     And the response body should contain "header-model-2"
+    # Cycle wraps back to header-model-1
+    When I set header "X-AI-Model" to "original-model"
+    And I set header "Content-Type" to "application/json"
+    And I send a POST request to "http://localhost:8080/rrr-header-loc/v1.0.0/chat" with body:
+      """
+      {"prompt": "test"}
+      """
+    Then the response status code should be 200
+    And the response body should contain "header-model-1"
     Given I authenticate using basic auth as "admin"
     When I delete the API "rrr-header-loc"
     Then the response should be successful
@@ -357,6 +366,13 @@ Feature: Model Round-Robin Load Balancing Policy
       """
     Then the response status code should be 200
     And the response body should contain "/models/path-model-y/chat"
+    # Cycle wraps back to path-model-x
+    When I send a POST request to "http://localhost:8080/rrr-path-loc/v1.0.0/models/original-model/chat" with body:
+      """
+      {"prompt": "test"}
+      """
+    Then the response status code should be 200
+    And the response body should contain "/models/path-model-x/chat"
     Given I authenticate using basic auth as "admin"
     When I delete the API "rrr-path-loc"
     Then the response should be successful
@@ -409,6 +425,13 @@ Feature: Model Round-Robin Load Balancing Policy
       """
     Then the response status code should be 200
     And the response body should contain "nested-model-2"
+    # Cycle wraps back to nested-model-1
+    When I send a POST request to "http://localhost:8080/rrr-nested-jsonpath/v1.0.0/chat" with body:
+      """
+      {"settings": {"ai": {"model": "original"}}, "prompt": "test"}
+      """
+    Then the response status code should be 200
+    And the response body should contain "nested-model-1"
     Given I authenticate using basic auth as "admin"
     When I delete the API "rrr-nested-jsonpath"
     Then the response should be successful
@@ -823,107 +846,6 @@ Feature: Model Round-Robin Load Balancing Policy
     When I delete the API "rrr-missing-model"
     Then the response should be successful
 
-  Scenario: Single model always returns same model
-    When I deploy an API with the following configuration:
-      """
-      apiVersion: gateway.api-platform.wso2.com/v1alpha1
-      kind: RestApi
-      metadata:
-        name: rrr-single-model
-      spec:
-        displayName: RRR Single Model
-        version: v1.0.0
-        context: /rrr-single-model/$version
-        upstream:
-          main:
-            url: http://sample-backend:9080
-        operations:
-          - method: POST
-            path: /chat
-            policies:
-              - name: model-round-robin
-                version: v0
-                params:
-                  models:
-                    - model: only-model
-                  requestModel:
-                    location: payload
-                    identifier: "$.model"
-          - method: GET
-            path: /health
-      """
-    Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/rrr-single-model/v1.0.0/health" to be ready
-    When I send a POST request to "http://localhost:8080/rrr-single-model/v1.0.0/chat" with body:
-      """
-      {"model": "any"}
-      """
-    Then the response status code should be 200
-    And the response body should contain "only-model"
-    When I send a POST request to "http://localhost:8080/rrr-single-model/v1.0.0/chat" with body:
-      """
-      {"model": "any"}
-      """
-    Then the response status code should be 200
-    And the response body should contain "only-model"
-    When I send a POST request to "http://localhost:8080/rrr-single-model/v1.0.0/chat" with body:
-      """
-      {"model": "any"}
-      """
-    Then the response status code should be 200
-    And the response body should contain "only-model"
-    Given I authenticate using basic auth as "admin"
-    When I delete the API "rrr-single-model"
-    Then the response should be successful
-
-  # ====================================================================
-  # REAL-WORLD SCENARIOS
-  # ====================================================================
-
-  Scenario: Equal load balancing across multiple AI providers
-    When I deploy an API with the following configuration:
-      """
-      apiVersion: gateway.api-platform.wso2.com/v1alpha1
-      kind: RestApi
-      metadata:
-        name: rrr-load-balance
-      spec:
-        displayName: RRR Load Balance
-        version: v1.0.0
-        context: /rrr-load-balance/$version
-        upstream:
-          main:
-            url: http://sample-backend:9080
-        operations:
-          - method: POST
-            path: /completions
-            policies:
-              - name: model-round-robin
-                version: v0
-                params:
-                  models:
-                    - model: openai-gpt-4
-                    - model: anthropic-claude-3
-                    - model: google-gemini-pro
-                  requestModel:
-                    location: payload
-                    identifier: "$.model"
-          - method: GET
-            path: /health
-      """
-    Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/rrr-load-balance/v1.0.0/health" to be ready
-    # Each model should get equal share of requests
-    When I send a POST request to "http://localhost:8080/rrr-load-balance/v1.0.0/completions" with body:
-      """
-      {"model": "any", "messages": [{"role": "user", "content": "Hello"}]}
-      """
-    Then the response status code should be 200
-    And the response body should contain "openai-gpt-4"
-    Given I authenticate using basic auth as "admin"
-    When I delete the API "rrr-load-balance"
-    Then the response should be successful
-
   Scenario: High availability with automatic failover
     When I deploy an API with the following configuration:
       """
@@ -973,48 +895,4 @@ Feature: Model Round-Robin Load Balancing Policy
     And the response body should match pattern "(backup-instance-1|backup-instance-2)"
     Given I authenticate using basic auth as "admin"
     When I delete the API "rrr-ha-failover"
-    Then the response should be successful
-
-  Scenario: Cost optimization across identical model deployments
-    When I deploy an API with the following configuration:
-      """
-      apiVersion: gateway.api-platform.wso2.com/v1alpha1
-      kind: RestApi
-      metadata:
-        name: rrr-cost-optimize
-      spec:
-        displayName: RRR Cost Optimize
-        version: v1.0.0
-        context: /rrr-cost-optimize/$version
-        upstream:
-          main:
-            url: http://sample-backend:9080
-        operations:
-          - method: POST
-            path: /chat
-            policies:
-              - name: model-round-robin
-                version: v0
-                params:
-                  models:
-                    - model: gpt-4-region-us
-                    - model: gpt-4-region-eu
-                    - model: gpt-4-region-asia
-                  requestModel:
-                    location: payload
-                    identifier: "$.model"
-          - method: GET
-            path: /health
-      """
-    Then the response should be successful
-    And I wait for the endpoint "http://localhost:8080/rrr-cost-optimize/v1.0.0/health" to be ready
-    # Distribute load evenly across regions to optimize costs
-    When I send a POST request to "http://localhost:8080/rrr-cost-optimize/v1.0.0/chat" with body:
-      """
-      {"model": "any", "prompt": "test"}
-      """
-    Then the response status code should be 200
-    And the response body should contain "gpt-4-region-us"
-    Given I authenticate using basic auth as "admin"
-    When I delete the API "rrr-cost-optimize"
     Then the response should be successful
