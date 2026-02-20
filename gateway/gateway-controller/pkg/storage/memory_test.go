@@ -19,6 +19,8 @@
 package storage
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -398,4 +400,322 @@ func TestConfigStore_CountActiveAPIKeysByUserAndAPI(t *testing.T) {
 	count, err = cs.CountActiveAPIKeysByUserAndAPI("non-existent", "user-1")
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
+}
+
+// ─── ConfigStore API config CRUD ─────────────────────────────────────────────
+
+// makeStoredConfig builds a minimal valid RestApi StoredConfig for CRUD testing.
+func makeStoredConfig(id, handle, displayName, version string) *models.StoredConfig {
+	mainURL := "http://backend:8080"
+	apiData := api.APIConfigData{
+		DisplayName: displayName,
+		Version:     version,
+		Context:     "/" + displayName,
+		Operations:  []api.Operation{{Method: "GET", Path: "/data"}},
+		Upstream: struct {
+			Main    api.Upstream  `json:"main" yaml:"main"`
+			Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+		}{
+			Main: api.Upstream{Url: &mainURL},
+		},
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	return &models.StoredConfig{
+		ID:   id,
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			Kind:     api.RestApi,
+			Metadata: api.Metadata{Name: handle},
+			Spec:     spec,
+		},
+		Status:    models.StatusDeployed,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+}
+
+func TestConfigStore_Add_Get_BasicRestAPI(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("id-1", "my-api", "My API", "v1")
+
+	err := cs.Add(cfg)
+	require.NoError(t, err)
+
+	got, err := cs.Get("id-1")
+	require.NoError(t, err)
+	assert.Equal(t, "id-1", got.ID)
+	assert.Equal(t, "my-api", got.GetHandle())
+}
+
+func TestConfigStore_Add_DuplicateHandle_Conflict(t *testing.T) {
+	cs := NewConfigStore()
+	cfg1 := makeStoredConfig("id-1", "same-handle", "API One", "v1")
+	cfg2 := makeStoredConfig("id-2", "same-handle", "API Two", "v2")
+
+	require.NoError(t, cs.Add(cfg1))
+	err := cs.Add(cfg2)
+	assert.ErrorIs(t, err, ErrConflict)
+}
+
+func TestConfigStore_Add_DuplicateNameVersion_Conflict(t *testing.T) {
+	cs := NewConfigStore()
+	// Same displayName:version but different handles
+	cfg1 := makeStoredConfig("id-1", "handle-a", "Duplicate API", "v1")
+	cfg2 := makeStoredConfig("id-2", "handle-b", "Duplicate API", "v1")
+
+	require.NoError(t, cs.Add(cfg1))
+	err := cs.Add(cfg2)
+	assert.ErrorIs(t, err, ErrConflict)
+}
+
+func TestConfigStore_GetByHandle(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("id-1", "my-api", "My API", "v1")
+	require.NoError(t, cs.Add(cfg))
+
+	got, err := cs.GetByHandle("my-api")
+	require.NoError(t, err)
+	assert.Equal(t, "id-1", got.ID)
+}
+
+func TestConfigStore_GetByHandle_NotFound(t *testing.T) {
+	cs := NewConfigStore()
+	_, err := cs.GetByHandle("nonexistent")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestConfigStore_GetByNameVersion(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("id-1", "my-api", "My API", "v1")
+	require.NoError(t, cs.Add(cfg))
+
+	got, err := cs.GetByNameVersion("My API", "v1")
+	require.NoError(t, err)
+	assert.Equal(t, "id-1", got.ID)
+}
+
+func TestConfigStore_GetByNameVersion_NotFound(t *testing.T) {
+	cs := NewConfigStore()
+	_, err := cs.GetByNameVersion("Unknown", "v99")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestConfigStore_Update(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("id-1", "my-api", "My API", "v1")
+	require.NoError(t, cs.Add(cfg))
+
+	// Build updated config (same ID, same handle, but version v2)
+	updated := makeStoredConfig("id-1", "my-api", "My API", "v2")
+	require.NoError(t, cs.Update(updated))
+
+	got, err := cs.Get("id-1")
+	require.NoError(t, err)
+	assert.Equal(t, "v2", got.GetVersion())
+}
+
+func TestConfigStore_Update_NotFound(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("nonexistent-id", "my-api", "My API", "v1")
+	err := cs.Update(cfg)
+	assert.Error(t, err, "updating non-existent ID should error")
+}
+
+func TestConfigStore_Delete(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("id-1", "my-api", "My API", "v1")
+	require.NoError(t, cs.Add(cfg))
+
+	require.NoError(t, cs.Delete("id-1"))
+
+	_, err := cs.Get("id-1")
+	assert.ErrorIs(t, err, ErrNotFound)
+	// Handle index should also be cleared
+	_, err = cs.GetByHandle("my-api")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestConfigStore_Delete_NotFound(t *testing.T) {
+	cs := NewConfigStore()
+	err := cs.Delete("nonexistent-id")
+	assert.Error(t, err)
+}
+
+func TestConfigStore_GetAll(t *testing.T) {
+	cs := NewConfigStore()
+	require.NoError(t, cs.Add(makeStoredConfig("id-1", "api-a", "API A", "v1")))
+	require.NoError(t, cs.Add(makeStoredConfig("id-2", "api-b", "API B", "v1")))
+	require.NoError(t, cs.Add(makeStoredConfig("id-3", "api-c", "API C", "v1")))
+
+	all := cs.GetAll()
+	assert.Len(t, all, 3)
+}
+
+func TestConfigStore_GetAllByKind(t *testing.T) {
+	cs := NewConfigStore()
+	require.NoError(t, cs.Add(makeStoredConfig("id-1", "api-a", "API A", "v1")))
+	require.NoError(t, cs.Add(makeStoredConfig("id-2", "api-b", "API B", "v1")))
+
+	restAPIs := cs.GetAllByKind(string(api.RestApi))
+	assert.Len(t, restAPIs, 2)
+
+	websubAPIs := cs.GetAllByKind(string(api.WebSubApi))
+	assert.Len(t, websubAPIs, 0)
+}
+
+func TestConfigStore_Labels_SaveAndGet(t *testing.T) {
+	cs := NewConfigStore()
+	labels := map[string]string{"env": "prod", "project-id": "proj-123"}
+	cfg := makeStoredConfig("id-1", "labeled-api", "Labeled API", "v1")
+	cfg.Configuration.Metadata.Labels = &labels
+	require.NoError(t, cs.Add(cfg))
+
+	got, err := cs.GetLabelsMap("labeled-api")
+	require.NoError(t, err)
+	assert.Equal(t, "prod", got["env"])
+	assert.Equal(t, "proj-123", got["project-id"])
+}
+
+func TestConfigStore_Labels_NotFound(t *testing.T) {
+	cs := NewConfigStore()
+	_, err := cs.GetLabelsMap("unknown-handle")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestConfigStore_ConcurrentAdd(t *testing.T) {
+	cs := NewConfigStore()
+	const n = 50
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			id := fmt.Sprintf("id-%d", idx)
+			handle := fmt.Sprintf("api-%d", idx)
+			name := fmt.Sprintf("API %d", idx)
+			_ = cs.Add(makeStoredConfig(id, handle, name, "v1"))
+		}(i)
+	}
+	wg.Wait()
+
+	all := cs.GetAll()
+	assert.Len(t, all, n)
+}
+
+// makeWebSubConfig builds a minimal valid WebSubApi StoredConfig for CRUD testing.
+func makeWebSubConfig(id, handle, displayName, version string, channels []api.Channel) *models.StoredConfig {
+	apiData := api.WebhookAPIData{
+		DisplayName: displayName,
+		Version:     version,
+		Context:     "/" + displayName,
+		Channels:    channels,
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(apiData)
+
+	return &models.StoredConfig{
+		ID:   id,
+		Kind: string(api.WebSubApi),
+		Configuration: api.APIConfiguration{
+			Kind:     api.WebSubApi,
+			Metadata: api.Metadata{Name: handle},
+			Spec:     spec,
+		},
+		Status:    models.StatusDeployed,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+}
+
+func TestConfigStore_Add_WebSubApi(t *testing.T) {
+	cs := NewConfigStore()
+	channels := []api.Channel{{Name: "/topic1", Method: "POST"}, {Name: "/topic2", Method: "POST"}}
+	cfg := makeWebSubConfig("ws-1", "my-websub", "My WebSub", "v1", channels)
+
+	err := cs.Add(cfg)
+	require.NoError(t, err)
+
+	got, err := cs.Get("ws-1")
+	require.NoError(t, err)
+	assert.Equal(t, string(api.WebSubApi), got.Kind)
+	// Verify topic manager registered the topics
+	topics := cs.TopicManager.GetAllByConfig("ws-1")
+	assert.Len(t, topics, 2)
+}
+
+func TestConfigStore_Update_HandleChange(t *testing.T) {
+	cs := NewConfigStore()
+	cfg := makeStoredConfig("id-1", "old-handle", "My API", "v1")
+	require.NoError(t, cs.Add(cfg))
+
+	// Update with a new handle
+	updated := makeStoredConfig("id-1", "new-handle", "My API", "v1")
+	require.NoError(t, cs.Update(updated))
+
+	// Old handle should no longer be findable
+	_, err := cs.GetByHandle("old-handle")
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// New handle should work
+	got, err := cs.GetByHandle("new-handle")
+	require.NoError(t, err)
+	assert.Equal(t, "id-1", got.ID)
+}
+
+func TestConfigStore_Update_HandleConflict(t *testing.T) {
+	cs := NewConfigStore()
+	require.NoError(t, cs.Add(makeStoredConfig("id-1", "handle-a", "API A", "v1")))
+	require.NoError(t, cs.Add(makeStoredConfig("id-2", "handle-b", "API B", "v1")))
+
+	// Try to update id-1's handle to one already used by id-2
+	conflicting := makeStoredConfig("id-1", "handle-b", "API A", "v1")
+	err := cs.Update(conflicting)
+	assert.ErrorIs(t, err, ErrConflict)
+}
+
+func TestConfigStore_Update_WebSubApi(t *testing.T) {
+	cs := NewConfigStore()
+	channels := []api.Channel{{Name: "/old-topic", Method: "POST"}}
+	cfg := makeWebSubConfig("ws-1", "ws-api", "WS API", "v1", channels)
+	require.NoError(t, cs.Add(cfg))
+
+	// Update with different channels
+	newChannels := []api.Channel{{Name: "/new-topic", Method: "POST"}}
+	updated := makeWebSubConfig("ws-1", "ws-api", "WS API", "v1", newChannels)
+	require.NoError(t, cs.Update(updated))
+
+	// The old topic should be gone, new topic present
+	topics := cs.TopicManager.GetAllByConfig("ws-1")
+	assert.Len(t, topics, 1)
+	assert.Contains(t, topics[0], "new-topic")
+}
+
+func TestConfigStore_GetByKindNameAndVersion(t *testing.T) {
+	cs := NewConfigStore()
+	require.NoError(t, cs.Add(makeStoredConfig("id-1", "api-a", "My API", "v1")))
+	require.NoError(t, cs.Add(makeStoredConfig("id-2", "api-b", "My API", "v2")))
+
+	got := cs.GetByKindNameAndVersion(string(api.RestApi), "My API", "v1")
+	require.NotNil(t, got)
+	assert.Equal(t, "id-1", got.ID)
+
+	// Different kind returns nil
+	notFound := cs.GetByKindNameAndVersion(string(api.WebSubApi), "My API", "v1")
+	assert.Nil(t, notFound)
+}
+
+func TestConfigStore_GetByKindAndHandle(t *testing.T) {
+	cs := NewConfigStore()
+	require.NoError(t, cs.Add(makeStoredConfig("id-1", "my-api", "My API", "v1")))
+
+	got := cs.GetByKindAndHandle(string(api.RestApi), "my-api")
+	require.NotNil(t, got)
+	assert.Equal(t, "id-1", got.ID)
+
+	// Wrong kind returns nil
+	notFound := cs.GetByKindAndHandle(string(api.WebSubApi), "my-api")
+	assert.Nil(t, notFound)
 }

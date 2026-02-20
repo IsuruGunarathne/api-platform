@@ -1794,3 +1794,232 @@ func TestTranslator_CreateDynamicFwdListenerForWebSubHub(t *testing.T) {
 		assert.Equal(t, core.SocketAddress_TCP, listener.GetAddress().GetSocketAddress().GetProtocol())
 	})
 }
+
+// ─── Fixture helpers for translateAPIConfig / TranslateConfigs tests ──────────
+
+// testRestAPIStoredConfig builds a deployed RestApi StoredConfig with a properly
+// populated spec so translateAPIConfig can parse it.
+func testRestAPIStoredConfig(id, context, version string, ops []api.Operation) *models.StoredConfig {
+	mainURL := "http://backend:8080"
+	apiData := api.APIConfigData{
+		DisplayName: id + "-display",
+		Version:     version,
+		Context:     context,
+		Operations:  ops,
+		Upstream: struct {
+			Main    api.Upstream  `json:"main" yaml:"main"`
+			Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+		}{
+			Main: api.Upstream{Url: &mainURL},
+		},
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	return &models.StoredConfig{
+		ID:   id,
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			Kind:     api.RestApi,
+			Metadata: api.Metadata{Name: id + "-handle"},
+			Spec:     spec,
+		},
+		Status: models.StatusDeployed,
+	}
+}
+
+// ─── translateAPIConfig tests ────────────────────────────────────────────────
+
+func TestTranslateAPIConfig_BasicRestAPI(t *testing.T) {
+	translator := createTestTranslator()
+
+	ops := []api.Operation{{Method: "GET", Path: "/users"}}
+	cfg := testRestAPIStoredConfig("basic-api", "/myapi", "v1", ops)
+
+	routes, clusters, err := translator.translateAPIConfig(cfg, []*models.StoredConfig{cfg})
+
+	require.NoError(t, err)
+	assert.Len(t, routes, 1, "one operation → one route")
+	assert.Len(t, clusters, 1, "one upstream → one cluster")
+}
+
+func TestTranslateAPIConfig_MultipleOperations(t *testing.T) {
+	translator := createTestTranslator()
+
+	ops := []api.Operation{
+		{Method: "GET", Path: "/users"},
+		{Method: "POST", Path: "/users"},
+		{Method: "GET", Path: "/items/{id}"},
+	}
+	cfg := testRestAPIStoredConfig("multi-op-api", "/api", "v1", ops)
+
+	routes, clusters, err := translator.translateAPIConfig(cfg, []*models.StoredConfig{cfg})
+
+	require.NoError(t, err)
+	assert.Len(t, routes, 3, "three operations → three routes")
+	assert.Len(t, clusters, 1, "all share the same upstream cluster")
+}
+
+func TestTranslateAPIConfig_WithSandboxUpstream(t *testing.T) {
+	translator := createTestTranslator()
+
+	ops := []api.Operation{{Method: "GET", Path: "/data"}}
+	cfg := testRestAPIStoredConfig("sandbox-api", "/api", "v1", ops)
+
+	// Add sandbox upstream
+	sandboxURL := "http://sandbox-backend:9090"
+	apiData, err := cfg.Configuration.Spec.AsAPIConfigData()
+	require.NoError(t, err)
+	apiData.Upstream.Sandbox = &api.Upstream{Url: &sandboxURL}
+	require.NoError(t, cfg.Configuration.Spec.FromAPIConfigData(apiData))
+
+	routes, clusters, err := translator.translateAPIConfig(cfg, []*models.StoredConfig{cfg})
+
+	require.NoError(t, err)
+	// One main route + one sandbox route
+	assert.Len(t, routes, 2)
+	// One main cluster + one sandbox cluster
+	assert.Len(t, clusters, 2)
+}
+
+func TestTranslateAPIConfig_InvalidSpec(t *testing.T) {
+	translator := createTestTranslator()
+
+	// RestApi kind with zero Spec (union is nil → AsAPIConfigData fails)
+	cfg := &models.StoredConfig{
+		ID:   "invalid-api",
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			Kind:     api.RestApi,
+			Metadata: api.Metadata{Name: "invalid-api"},
+		},
+		Status: models.StatusDeployed,
+	}
+
+	routes, clusters, err := translator.translateAPIConfig(cfg, []*models.StoredConfig{})
+
+	assert.Error(t, err)
+	assert.Nil(t, routes)
+	assert.Nil(t, clusters)
+}
+
+func TestTranslateAPIConfig_InvalidUpstream(t *testing.T) {
+	translator := createTestTranslator()
+
+	// Upstream references a definition that doesn't exist
+	ref := "non-existent-upstream"
+	apiData := api.APIConfigData{
+		DisplayName: "ref-api",
+		Version:     "v1",
+		Context:     "/api",
+		Operations:  []api.Operation{{Method: "GET", Path: "/data"}},
+		Upstream: struct {
+			Main    api.Upstream  `json:"main" yaml:"main"`
+			Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+		}{
+			Main: api.Upstream{Ref: &ref},
+		},
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &models.StoredConfig{
+		ID:   "ref-api",
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			Kind:     api.RestApi,
+			Metadata: api.Metadata{Name: "ref-api"},
+			Spec:     spec,
+		},
+		Status: models.StatusDeployed,
+	}
+
+	_, _, err := translator.translateAPIConfig(cfg, []*models.StoredConfig{})
+
+	assert.Error(t, err)
+}
+
+func TestTranslateAPIConfig_CustomVhosts(t *testing.T) {
+	translator := createTestTranslator()
+
+	ops := []api.Operation{{Method: "GET", Path: "/data"}}
+	cfg := testRestAPIStoredConfig("custom-vhost-api", "/api", "v1", ops)
+
+	customMain := "api.example.com"
+	apiData, err := cfg.Configuration.Spec.AsAPIConfigData()
+	require.NoError(t, err)
+	apiData.Vhosts = &struct {
+		Main    string  `json:"main" yaml:"main"`
+		Sandbox *string `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+	}{Main: customMain}
+	require.NoError(t, cfg.Configuration.Spec.FromAPIConfigData(apiData))
+
+	routes, _, err := translator.translateAPIConfig(cfg, []*models.StoredConfig{cfg})
+
+	require.NoError(t, err)
+	require.Len(t, routes, 1)
+	// Route name format: "METHOD|PATH|VHOST" — vhost must be the custom one
+	assert.Contains(t, routes[0].Name, customMain)
+}
+
+// ─── TranslateConfigs tests ───────────────────────────────────────────────────
+
+func TestTranslateConfigs_SingleRestAPI(t *testing.T) {
+	translator := createTestTranslator()
+
+	ops := []api.Operation{{Method: "GET", Path: "/hello"}}
+	cfg := testRestAPIStoredConfig("hello-api", "/hello", "v1", ops)
+	cfg.Status = models.StatusDeployed
+
+	resources, err := translator.TranslateConfigs([]*models.StoredConfig{cfg}, "corr-1")
+
+	require.NoError(t, err)
+	require.NotNil(t, resources)
+	assert.NotEmpty(t, resources[resource.ClusterType], "deployed API should produce clusters")
+	assert.NotEmpty(t, resources[resource.ListenerType], "should always have at least one listener")
+	assert.NotEmpty(t, resources[resource.RouteType], "should have route configuration")
+}
+
+func TestTranslateConfigs_UndeployedFiltered(t *testing.T) {
+	translator := createTestTranslator()
+
+	ops := []api.Operation{{Method: "GET", Path: "/data"}}
+	cfg := testRestAPIStoredConfig("undeployed-api", "/data", "v1", ops)
+	cfg.Status = models.StatusUndeployed
+
+	// Translate with only the undeployed config; also translate with an empty
+	// list so we can compare cluster counts — an undeployed API must not add
+	// any additional (backend) clusters beyond infrastructure-only clusters.
+	resourcesWithUndeployed, err := translator.TranslateConfigs([]*models.StoredConfig{cfg}, "corr-2")
+	require.NoError(t, err)
+
+	resourcesEmpty, err := translator.TranslateConfigs([]*models.StoredConfig{}, "corr-2-empty")
+	require.NoError(t, err)
+
+	// Cluster count must be the same as with an empty config list because the
+	// undeployed API's backend cluster must not be included.
+	assert.Equal(t,
+		len(resourcesEmpty[resource.ClusterType]),
+		len(resourcesWithUndeployed[resource.ClusterType]),
+		"undeployed API must not contribute additional backend clusters",
+	)
+}
+
+func TestTranslateConfigs_MultipleAPIs_SameVHost(t *testing.T) {
+	translator := createTestTranslator()
+
+	// Two APIs on the same (default) main vhost
+	ops1 := []api.Operation{{Method: "GET", Path: "/users"}}
+	ops2 := []api.Operation{{Method: "GET", Path: "/items"}}
+	cfg1 := testRestAPIStoredConfig("api-users", "/users", "v1", ops1)
+	cfg2 := testRestAPIStoredConfig("api-items", "/items", "v1", ops2)
+
+	resources, err := translator.TranslateConfigs([]*models.StoredConfig{cfg1, cfg2}, "corr-3")
+
+	require.NoError(t, err)
+	require.NotNil(t, resources)
+	// Both APIs produce clusters (two different upstreams for two configs)
+	assert.NotEmpty(t, resources[resource.ClusterType])
+	// Only one listener needed (same vhost handled by a single virtual host)
+	assert.NotEmpty(t, resources[resource.ListenerType])
+}
