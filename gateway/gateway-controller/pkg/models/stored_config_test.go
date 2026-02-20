@@ -90,6 +90,264 @@ func TestStoredConfig_NilDeployedAt(t *testing.T) {
 	assert.Nil(t, config.DeployedAt)
 }
 
+func TestStoredConfig_GetCompositeKey_RestAPI(t *testing.T) {
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "My REST API:v1.0", cfg.GetCompositeKey())
+}
+
+func TestStoredConfig_GetCompositeKey_WebSubApi(t *testing.T) {
+	webhookData := api.WebhookAPIData{
+		DisplayName: "My WebSub API",
+		Version:     "v2.0",
+		Context:     "/webhook",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(webhookData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.WebSubApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "My WebSub API:v2.0", cfg.GetCompositeKey())
+}
+
+func TestStoredConfig_GetCompositeKey_InvalidSpec(t *testing.T) {
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			// Spec has nil union → AsAPIConfigData() will return an error
+		},
+	}
+
+	assert.Equal(t, "", cfg.GetCompositeKey())
+}
+
+func TestStoredConfig_GetDisplayName_RestAPI(t *testing.T) {
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "My REST API", cfg.GetDisplayName())
+}
+
+func TestStoredConfig_GetDisplayName_WebSubApi(t *testing.T) {
+	webhookData := api.WebhookAPIData{
+		DisplayName: "My WebSub API",
+		Version:     "v2.0",
+		Context:     "/webhook",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(webhookData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.WebSubApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "My WebSub API", cfg.GetDisplayName())
+}
+
+func TestStoredConfig_GetDisplayName_InvalidSpec(t *testing.T) {
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+		},
+	}
+
+	assert.Equal(t, "", cfg.GetDisplayName())
+}
+
+func TestStoredConfig_GetVersion_RestAPI(t *testing.T) {
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "v1.0", cfg.GetVersion())
+}
+
+func TestStoredConfig_GetVersion_WebSubApi(t *testing.T) {
+	webhookData := api.WebhookAPIData{
+		DisplayName: "My WebSub API",
+		Version:     "v2.0",
+		Context:     "/webhook",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(webhookData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.WebSubApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "v2.0", cfg.GetVersion())
+}
+
+func TestStoredConfig_GetVersion_InvalidSpec(t *testing.T) {
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+		},
+	}
+
+	assert.Equal(t, "", cfg.GetVersion())
+}
+
+func TestStoredConfig_GetContext_RestAPI(t *testing.T) {
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "/my-api", cfg.GetContext())
+}
+
+func TestStoredConfig_GetContext_WebSubApi(t *testing.T) {
+	webhookData := api.WebhookAPIData{
+		DisplayName: "My WebSub API",
+		Version:     "v2.0",
+		Context:     "/webhook",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(webhookData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.WebSubApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Equal(t, "/webhook", cfg.GetContext())
+}
+
+func TestStoredConfig_GetContext_InvalidSpec(t *testing.T) {
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+		},
+	}
+
+	assert.Equal(t, "", cfg.GetContext())
+}
+
+func TestStoredConfig_GetPolicies_RestAPI_WithPolicies(t *testing.T) {
+	policies := []api.Policy{
+		{Name: "test-policy", Version: "v1"},
+	}
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+		Policies:    &policies,
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Spec: spec,
+		},
+	}
+
+	result := cfg.GetPolicies()
+	assert.NotNil(t, result)
+	assert.Len(t, *result, 1)
+	assert.Equal(t, "test-policy", (*result)[0].Name)
+}
+
+func TestStoredConfig_GetPolicies_RestAPI_NilPolicies(t *testing.T) {
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+		Policies:    nil,
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Nil(t, cfg.GetPolicies())
+}
+
+func TestStoredConfig_GetPolicies_WebSubApi(t *testing.T) {
+	webhookData := api.WebhookAPIData{
+		DisplayName: "My WebSub API",
+		Version:     "v2.0",
+		Context:     "/webhook",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(webhookData)
+
+	cfg := &StoredConfig{
+		Configuration: api.APIConfiguration{
+			Kind: api.WebSubApi,
+			Spec: spec,
+		},
+	}
+
+	assert.Nil(t, cfg.GetPolicies())
+}
+
 func TestStoredConfig_SourceConfiguration(t *testing.T) {
 	sourceConfig := map[string]interface{}{
 		"kind": "API",

@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 )
 
 func TestGetValueFromSourceConfig(t *testing.T) {
@@ -151,6 +152,84 @@ func TestGetValueFromSourceConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractNameVersion_RestAPI(t *testing.T) {
+	apiData := api.APIConfigData{
+		DisplayName: "My REST API",
+		Version:     "v1.0",
+		Context:     "/my-api",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromAPIConfigData(apiData)
+
+	cfg := api.APIConfiguration{
+		Kind: api.RestApi,
+		Spec: spec,
+	}
+
+	name, version, err := ExtractNameVersion(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, "My REST API", name)
+	assert.Equal(t, "v1.0", version)
+}
+
+func TestExtractNameVersion_WebSubApi(t *testing.T) {
+	webhookData := api.WebhookAPIData{
+		DisplayName: "My WebSub API",
+		Version:     "v2.0",
+		Context:     "/webhook",
+	}
+	spec := api.APIConfiguration_Spec{}
+	_ = spec.FromWebhookAPIData(webhookData)
+
+	cfg := api.APIConfiguration{
+		Kind: api.WebSubApi,
+		Spec: spec,
+	}
+
+	name, version, err := ExtractNameVersion(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, "My WebSub API", name)
+	assert.Equal(t, "v2.0", version)
+}
+
+func TestExtractNameVersion_UnsupportedKind(t *testing.T) {
+	cfg := api.APIConfiguration{
+		Kind: api.APIConfigurationKind("UnknownKind"),
+	}
+
+	name, version, err := ExtractNameVersion(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported api kind")
+	assert.Empty(t, name)
+	assert.Empty(t, version)
+}
+
+func TestExtractNameVersion_InvalidRestAPISpec(t *testing.T) {
+	cfg := api.APIConfiguration{
+		Kind: api.RestApi,
+		// Spec has nil union → AsAPIConfigData() will return an error
+	}
+
+	name, version, err := ExtractNameVersion(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse RestApi api config data")
+	assert.Empty(t, name)
+	assert.Empty(t, version)
+}
+
+func TestExtractNameVersion_InvalidWebSubSpec(t *testing.T) {
+	cfg := api.APIConfiguration{
+		Kind: api.WebSubApi,
+		// Spec has nil union → AsWebhookAPIData() will return an error
+	}
+
+	name, version, err := ExtractNameVersion(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse async/websub api config data")
+	assert.Empty(t, name)
+	assert.Empty(t, version)
 }
 
 func TestGetValueFromSourceConfig_StructInput(t *testing.T) {
