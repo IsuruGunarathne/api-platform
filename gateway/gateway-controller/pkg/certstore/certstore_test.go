@@ -20,6 +20,7 @@ package certstore
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
 
 // Test certificate in PEM format (self-signed test cert)
@@ -459,4 +461,421 @@ func TestCertStore_LoadCustomCertificates_CertChainInFile(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count) // Two certificates in the chain
 	assert.NotEmpty(t, data)
+}
+
+// ============================================================
+// mockCertStorage — implements storage.Storage for certstore tests
+// ============================================================
+
+type mockCertStorage struct {
+	certs        []*models.StoredCertificate // shared state; SaveCertificate appends here
+	savedCerts   []*models.StoredCertificate // only certs added during the test run
+	getByNameErr error
+	saveErr      error
+	listErr      error
+}
+
+// --- real logic: the three methods certstore actually calls ---
+
+func (m *mockCertStorage) GetCertificateByName(name string) (*models.StoredCertificate, error) {
+	if m.getByNameErr != nil {
+		return nil, m.getByNameErr
+	}
+	for _, c := range m.certs {
+		if c.Name == name {
+			return c, nil
+		}
+	}
+	return nil, nil // not found; no error
+}
+
+func (m *mockCertStorage) SaveCertificate(cert *models.StoredCertificate) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.certs = append(m.certs, cert)
+	m.savedCerts = append(m.savedCerts, cert)
+	return nil
+}
+
+func (m *mockCertStorage) ListCertificates() ([]*models.StoredCertificate, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.certs, nil
+}
+
+// --- stubs for the remaining interface methods ---
+
+func (m *mockCertStorage) GetCertificate(id string) (*models.StoredCertificate, error) {
+	return nil, nil
+}
+func (m *mockCertStorage) DeleteCertificate(id string) error { return nil }
+
+func (m *mockCertStorage) SaveConfig(cfg *models.StoredConfig) error         { return nil }
+func (m *mockCertStorage) UpdateConfig(cfg *models.StoredConfig) error       { return nil }
+func (m *mockCertStorage) DeleteConfig(id string) error                      { return nil }
+func (m *mockCertStorage) GetConfig(id string) (*models.StoredConfig, error) { return nil, nil }
+func (m *mockCertStorage) GetConfigByNameVersion(name, version string) (*models.StoredConfig, error) {
+	return nil, nil
+}
+func (m *mockCertStorage) GetConfigByHandle(handle string) (*models.StoredConfig, error) {
+	return nil, nil
+}
+func (m *mockCertStorage) GetAllConfigs() ([]*models.StoredConfig, error) { return nil, nil }
+func (m *mockCertStorage) GetAllConfigsByKind(kind string) ([]*models.StoredConfig, error) {
+	return nil, nil
+}
+
+func (m *mockCertStorage) SaveLLMProviderTemplate(t *models.StoredLLMProviderTemplate) error {
+	return nil
+}
+func (m *mockCertStorage) UpdateLLMProviderTemplate(t *models.StoredLLMProviderTemplate) error {
+	return nil
+}
+func (m *mockCertStorage) DeleteLLMProviderTemplate(id string) error { return nil }
+func (m *mockCertStorage) GetLLMProviderTemplate(id string) (*models.StoredLLMProviderTemplate, error) {
+	return nil, nil
+}
+func (m *mockCertStorage) GetAllLLMProviderTemplates() ([]*models.StoredLLMProviderTemplate, error) {
+	return nil, nil
+}
+
+func (m *mockCertStorage) SaveAPIKey(apiKey *models.APIKey) error                { return nil }
+func (m *mockCertStorage) GetAPIKeyByID(id string) (*models.APIKey, error)       { return nil, nil }
+func (m *mockCertStorage) GetAPIKeyByKey(key string) (*models.APIKey, error)     { return nil, nil }
+func (m *mockCertStorage) GetAPIKeysByAPI(apiId string) ([]*models.APIKey, error) { return nil, nil }
+func (m *mockCertStorage) GetAllAPIKeys() ([]*models.APIKey, error)              { return nil, nil }
+func (m *mockCertStorage) GetAPIKeysByAPIAndName(apiId, name string) (*models.APIKey, error) {
+	return nil, nil
+}
+func (m *mockCertStorage) UpdateAPIKey(apiKey *models.APIKey) error        { return nil }
+func (m *mockCertStorage) DeleteAPIKey(key string) error                   { return nil }
+func (m *mockCertStorage) RemoveAPIKeysAPI(apiId string) error             { return nil }
+func (m *mockCertStorage) RemoveAPIKeyAPIAndName(apiId, name string) error { return nil }
+func (m *mockCertStorage) CountActiveAPIKeysByUserAndAPI(apiId, userID string) (int, error) {
+	return 0, nil
+}
+
+func (m *mockCertStorage) Close() error { return nil }
+
+// ============================================================
+// Tests for LoadCertificates()
+// ============================================================
+
+func TestCertStore_LoadCertificates_NoDB_NoSystemPath(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	cs := NewCertStore(logger, nil, "", "")
+
+	result, err := cs.LoadCertificates()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no certificates loaded")
+	assert.Nil(t, result)
+}
+
+func TestCertStore_LoadCertificates_WithDBCerts(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "1", Name: "test.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	result, err := cs.LoadCertificates()
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Contains(t, string(result), "BEGIN CERTIFICATE")
+}
+
+func TestCertStore_LoadCertificates_DBListError_NoFallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		listErr: errors.New("db connection error"),
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	result, err := cs.LoadCertificates()
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestCertStore_LoadCertificates_DBListError_SystemCertSaves(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		listErr: errors.New("db connection error"),
+	}
+
+	tmpFile, err := os.CreateTemp("", "system-certs-*.pem")
+	assert.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+	_, err = tmpFile.WriteString(validCertPEM)
+	assert.NoError(t, err)
+	tmpFile.Close()
+
+	cs := NewCertStore(logger, mock, "", tmpFile.Name())
+
+	result, err := cs.LoadCertificates()
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Contains(t, string(result), "BEGIN CERTIFICATE")
+}
+
+func TestCertStore_LoadCertificates_SystemCertOnly(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	tmpFile, err := os.CreateTemp("", "system-certs-*.pem")
+	assert.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+	_, err = tmpFile.WriteString(validCertPEM)
+	assert.NoError(t, err)
+	tmpFile.Close()
+
+	cs := NewCertStore(logger, nil, "", tmpFile.Name())
+
+	result, err := cs.LoadCertificates()
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Contains(t, string(result), "BEGIN CERTIFICATE")
+}
+
+func TestCertStore_LoadCertificates_InvalidSystemPath(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{}
+	cs := NewCertStore(logger, mock, "", "/nonexistent/path/to/certs.pem")
+
+	result, err := cs.LoadCertificates()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to load both custom and system certificates")
+	assert.Nil(t, result)
+}
+
+func TestCertStore_LoadCertificates_DBCerts_SystemFail(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "1", Name: "test.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	cs := NewCertStore(logger, mock, "", "/nonexistent/system/certs.pem")
+
+	result, err := cs.LoadCertificates()
+	// loadedCount > 0 from DB, so system cert failure is non-fatal
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+func TestCertStore_LoadCertificates_SetsGetCombinedCerts(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "1", Name: "test.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	result, err := cs.LoadCertificates()
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+
+	combined := cs.GetCombinedCertificates()
+	assert.Equal(t, result, combined)
+}
+
+func TestCertStore_LoadCertificates_InvalidCertInDB(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "1", Name: "bad.pem", Certificate: []byte(invalidPEM)},
+		},
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	result, err := cs.LoadCertificates()
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+// ============================================================
+// Tests for Reload()
+// ============================================================
+
+func TestCertStore_Reload_Success(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "1", Name: "test.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	err := cs.Reload()
+	assert.NoError(t, err)
+}
+
+func TestCertStore_Reload_Error(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	cs := NewCertStore(logger, nil, "", "")
+
+	err := cs.Reload()
+	assert.Error(t, err)
+}
+
+// ============================================================
+// Tests for bootstrapCertificatesFromFilesystem()
+// ============================================================
+
+func TestCertStore_Bootstrap_DirNotExist(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{}
+	cs := NewCertStore(logger, mock, "/nonexistent/certs/dir", "")
+
+	err := cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Empty(t, mock.savedCerts)
+}
+
+func TestCertStore_Bootstrap_NewCert_SavedToDB(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{}
+	tempDir := t.TempDir()
+
+	certPath := filepath.Join(tempDir, "cert.pem")
+	err := os.WriteFile(certPath, []byte(validCertPEM), 0644)
+	assert.NoError(t, err)
+
+	cs := NewCertStore(logger, mock, tempDir, "")
+	err = cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Len(t, mock.savedCerts, 1)
+	assert.Equal(t, "cert.pem", mock.savedCerts[0].Name)
+}
+
+func TestCertStore_Bootstrap_CertAlreadyInDB_Skipped(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "existing", Name: "cert.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	tempDir := t.TempDir()
+
+	certPath := filepath.Join(tempDir, "cert.pem")
+	err := os.WriteFile(certPath, []byte(validCertPEM), 0644)
+	assert.NoError(t, err)
+
+	cs := NewCertStore(logger, mock, tempDir, "")
+	err = cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Empty(t, mock.savedCerts)
+}
+
+func TestCertStore_Bootstrap_GetByNameError_Continues(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		getByNameErr: errors.New("db lookup error"),
+	}
+	tempDir := t.TempDir()
+
+	certPath := filepath.Join(tempDir, "cert.pem")
+	err := os.WriteFile(certPath, []byte(validCertPEM), 0644)
+	assert.NoError(t, err)
+
+	cs := NewCertStore(logger, mock, tempDir, "")
+	err = cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Empty(t, mock.savedCerts)
+}
+
+func TestCertStore_Bootstrap_SaveError_Continues(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		saveErr: errors.New("db save error"),
+	}
+	tempDir := t.TempDir()
+
+	certPath := filepath.Join(tempDir, "cert.pem")
+	err := os.WriteFile(certPath, []byte(validCertPEM), 0644)
+	assert.NoError(t, err)
+
+	cs := NewCertStore(logger, mock, tempDir, "")
+	err = cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Empty(t, mock.savedCerts)
+}
+
+func TestCertStore_Bootstrap_InvalidCertFile_Skipped(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{}
+	tempDir := t.TempDir()
+
+	badPath := filepath.Join(tempDir, "bad.pem")
+	err := os.WriteFile(badPath, []byte(invalidPEM), 0644)
+	assert.NoError(t, err)
+
+	cs := NewCertStore(logger, mock, tempDir, "")
+	err = cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Empty(t, mock.savedCerts)
+}
+
+func TestCertStore_Bootstrap_MultipleCerts_OneNew_OneExisting(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "existing", Name: "existing.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	tempDir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(tempDir, "existing.pem"), []byte(validCertPEM), 0644)
+	assert.NoError(t, err)
+	err = os.WriteFile(filepath.Join(tempDir, "new.pem"), []byte(validCertPEM), 0644)
+	assert.NoError(t, err)
+
+	cs := NewCertStore(logger, mock, tempDir, "")
+	err = cs.bootstrapCertificatesFromFilesystem()
+	assert.NoError(t, err)
+	assert.Len(t, mock.savedCerts, 1)
+	assert.Equal(t, "new.pem", mock.savedCerts[0].Name)
+}
+
+// ============================================================
+// Tests for certificateExistsByName()
+// ============================================================
+
+func TestCertStore_CertificateExistsByName_Exists(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		certs: []*models.StoredCertificate{
+			{ID: "1", Name: "test.pem", Certificate: []byte(validCertPEM)},
+		},
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	exists, err := cs.certificateExistsByName("test.pem")
+	assert.NoError(t, err)
+	assert.True(t, exists)
+}
+
+func TestCertStore_CertificateExistsByName_NotExists(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{}
+	cs := NewCertStore(logger, mock, "", "")
+
+	exists, err := cs.certificateExistsByName("test.pem")
+	assert.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestCertStore_CertificateExistsByName_DBError(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := &mockCertStorage{
+		getByNameErr: errors.New("db error"),
+	}
+	cs := NewCertStore(logger, mock, "", "")
+
+	exists, err := cs.certificateExistsByName("test.pem")
+	assert.Error(t, err)
+	assert.False(t, exists)
 }
