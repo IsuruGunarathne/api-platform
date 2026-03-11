@@ -365,6 +365,15 @@ type APIKeySecurity struct {
 // APIKeySecurityIn Location of the API key (header or query)
 type APIKeySecurityIn string
 
+// APIVhost Per-deployment virtual host override. Omit or use '_gateway_default_' to have the gateway resolve and persist its current defaults. Values are always persisted so gateway restarts do not affect existing deployments.
+type APIVhost struct {
+	// Main Virtual host for production (main) traffic, or '_gateway_default_' to use the gateway's configured default
+	Main *string `json:"main,omitempty" yaml:"main,omitempty"`
+
+	// Sandbox Virtual host for sandbox traffic, or '_gateway_default_' to use the gateway's configured default
+	Sandbox *string `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+}
+
 // AddGatewayToRESTAPIRequest defines model for AddGatewayToRESTAPIRequest.
 type AddGatewayToRESTAPIRequest struct {
 	GatewayId openapi_types.UUID `binding:"required" json:"gatewayId" yaml:"gatewayId"`
@@ -645,6 +654,9 @@ type DeployRequest struct {
 
 	// Name Name/label for this deployment (e.g., "v1.0-prod", "hotfix-2024-01-15")
 	Name string `binding:"required" json:"name" yaml:"name"`
+
+	// Vhost Per-deployment virtual host override. Omit or use '_gateway_default_' to have the gateway resolve and persist its current defaults. Values are always persisted so gateway restarts do not affect existing deployments.
+	Vhost *APIVhost `json:"vhost,omitempty" yaml:"vhost,omitempty"`
 }
 
 // DeploymentListResponse defines model for DeploymentListResponse.
@@ -684,6 +696,9 @@ type DeploymentResponse struct {
 
 	// UpdatedAt Timestamp when the deployment status last changed (null for ARCHIVED deployments)
 	UpdatedAt *time.Time `json:"updatedAt" yaml:"updatedAt"`
+
+	// Vhost Per-deployment virtual host override. Omit or use '_gateway_default_' to have the gateway resolve and persist its current defaults. Values are always persisted so gateway restarts do not affect existing deployments.
+	Vhost *APIVhost `json:"vhost,omitempty" yaml:"vhost,omitempty"`
 }
 
 // DeploymentResponseStatus Current deployment lifecycle state:

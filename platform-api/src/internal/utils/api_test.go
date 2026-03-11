@@ -582,3 +582,4 @@ func TestAPIYAMLDataToRESTAPIPreservesPolicies(t *testing.T) {
 		t.Errorf("API policies = %v, want %v", restAPI.Policies, expectedPolicies)
 	}
 }
+

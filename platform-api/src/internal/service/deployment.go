@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
+	"strings"
 	"time"
 
 	"platform-api/src/api"
@@ -34,6 +36,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// vhostGatewayDefault is the sentinel value that instructs the gateway-controller to resolve
+// and persist the current gateway default vhosts, ensuring deployments are immune to future
+// gateway config changes.
+const vhostGatewayDefault = "_gateway_default_"
+
+// vhostLabelRe matches a single valid DNS label per RFC 1035.
+var vhostLabelRe = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 
 // DeploymentService handles business logic for API deployment operations
 type DeploymentService struct {
@@ -113,6 +123,7 @@ func (s *DeploymentService) DeployAPI(apiUUID string, req *api.DeployRequest, or
 
 	var baseDeploymentID *string
 	var contentBytes []byte
+	var baseDeployment *model.Deployment
 
 	// Determine the source: "current" or existing deployment
 	if req.Base == "current" {
@@ -126,7 +137,8 @@ func (s *DeploymentService) DeployAPI(apiUUID string, req *api.DeployRequest, or
 		contentBytes = []byte(apiYaml)
 	} else {
 		// Use existing deployment as base
-		baseDeployment, err := s.deploymentRepo.GetWithContent(req.Base, apiUUID, orgUUID)
+		var err error
+		baseDeployment, err = s.deploymentRepo.GetWithContent(req.Base, apiUUID, orgUUID)
 		if err != nil {
 			if errors.Is(err, constants.ErrDeploymentNotFound) {
 				return nil, constants.ErrBaseDeploymentNotFound
@@ -169,7 +181,69 @@ func (s *DeploymentService) DeployAPI(apiUUID string, req *api.DeployRequest, or
 		}
 	}
 
-	// Create new deployment record with limit enforcement
+	// Determine vhost values.
+	// For "current" base: default to sentinel so the gateway resolves and persists its defaults.
+	// For an existing deployment base: start from the base's stored vhosts, then apply any overrides.
+	var vhostMain string
+	var vhostSandbox *string
+
+	if req.Base == "current" {
+		// Fresh deployment: default to sentinel so the gateway resolves and persists its defaults.
+		vhostMain = vhostGatewayDefault
+		if apiModel.Configuration.Upstream.Sandbox != nil {
+			sandboxSentinel := vhostGatewayDefault
+			vhostSandbox = &sandboxSentinel
+		}
+	} else {
+		// Base deployment: start from the base's stored vhosts.
+		if baseDeployment != nil && baseDeployment.Metadata != nil {
+			if m, ok := baseDeployment.Metadata[constants.MetadataKeyVhostMain]; ok {
+				if ms, ok := m.(string); ok {
+					vhostMain = ms
+				}
+			}
+			if m, ok := baseDeployment.Metadata[constants.MetadataKeyVhostSandbox]; ok {
+				if ms, ok := m.(string); ok {
+					vhostSandbox = &ms
+				}
+			}
+		}
+	}
+
+	if req.Vhost != nil {
+		// Apply only the fields explicitly provided; leave others at their current value.
+		if req.Vhost.Main != nil && *req.Vhost.Main != "" {
+			if !isValidVHostOrSentinel(*req.Vhost.Main) {
+				return nil, fmt.Errorf("invalid vhost.main value: %s", *req.Vhost.Main)
+			}
+			vhostMain = *req.Vhost.Main
+		}
+		if req.Vhost.Sandbox != nil && *req.Vhost.Sandbox != "" {
+			if !isValidVHostOrSentinel(*req.Vhost.Sandbox) {
+				return nil, fmt.Errorf("invalid vhost.sandbox value: %s", *req.Vhost.Sandbox)
+			}
+			vhostSandbox = req.Vhost.Sandbox
+		}
+	}
+
+	if req.Base == "current" || req.Vhost != nil {
+		// Inject vhost into the deployment YAML so it is persisted in the gateway.
+		contentBytes, err = overrideVhost(contentBytes, vhostMain, vhostSandbox)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inject vhost into deployment YAML: %w", err)
+		}
+	}
+	// If base: <deploymentId> and no vhost override, contentBytes already has the base's vhosts.
+
+	// Store vhost in metadata so it is returned in the deployment response.
+	if vhostMain != "" {
+		metadata[constants.MetadataKeyVhostMain] = vhostMain
+	}
+	if vhostSandbox != nil {
+		metadata[constants.MetadataKeyVhostSandbox] = *vhostSandbox
+	}
+
+	// Create new deployment record with limit enforcement.
 	// Hard limit = soft limit (configured) + 5 buffer for concurrent deployments
 	deployment := &model.Deployment{
 		DeploymentID:     deploymentID,
@@ -426,6 +500,40 @@ func overrideEndpointURL(contentBytes []byte, newURL string) ([]byte, error) {
 	return modifiedBytes, nil
 }
 
+// isValidVHostOrSentinel returns true if vhost is the gateway-default sentinel or a valid RFC 1035 hostname.
+func isValidVHostOrSentinel(vhost string) bool {
+	if vhost == vhostGatewayDefault {
+		return true
+	}
+	if vhost == "" {
+		return false
+	}
+	labels := strings.Split(vhost, ".")
+	for _, label := range labels {
+		if !vhostLabelRe.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// overrideVhost injects the given vhost values into a deployment YAML's spec.vhosts section.
+func overrideVhost(contentBytes []byte, main string, sandbox *string) ([]byte, error) {
+	var apiDeployment dto.APIDeploymentYAML
+	if err := yaml.Unmarshal(contentBytes, &apiDeployment); err != nil {
+		return nil, fmt.Errorf("failed to parse deployment YAML: %w", err)
+	}
+	apiDeployment.Spec.Vhosts = &dto.VhostsYAML{
+		Main:    main,
+		Sandbox: sandbox,
+	}
+	modifiedBytes, err := yaml.Marshal(&apiDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal deployment YAML with vhost: %w", err)
+	}
+	return modifiedBytes, nil
+}
+
 // GetDeployments retrieves all deployments for an API with optional filters
 func (s *DeploymentService) GetDeployments(apiUUID, orgUUID string, gatewayID *string, status *string) (*api.DeploymentListResponse, error) {
 	// Verify API exists
@@ -674,6 +782,23 @@ func toAPIDeploymentResponse(
 	gatewayUUID := utils.ParseOpenAPIUUIDOrZero(gatewayID)
 	baseUUID := utils.ParseOptionalOpenAPIUUID(baseDeploymentID)
 
+	// Extract vhost from metadata and populate the response field.
+	var vhost *api.APIVhost
+	if vhostMainRaw, ok := metadata[constants.MetadataKeyVhostMain]; ok {
+		if vhostMainStr, ok := vhostMainRaw.(string); ok {
+			vhost = &api.APIVhost{Main: &vhostMainStr}
+			if vhostSandboxRaw, ok := metadata[constants.MetadataKeyVhostSandbox]; ok {
+				if vhostSandboxStr, ok := vhostSandboxRaw.(string); ok {
+					vhost.Sandbox = &vhostSandboxStr
+				} else {
+					slog.Warn("unexpected type for vhost_sandbox metadata", "type", fmt.Sprintf("%T", vhostSandboxRaw))
+				}
+			}
+		} else {
+			slog.Warn("unexpected type for vhost_main metadata", "type", fmt.Sprintf("%T", vhostMainRaw))
+		}
+	}
+
 	return &api.DeploymentResponse{
 		BaseDeploymentId: baseUUID,
 		CreatedAt:        createdAt,
@@ -683,5 +808,6 @@ func toAPIDeploymentResponse(
 		Name:             name,
 		Status:           api.DeploymentResponseStatus(status),
 		UpdatedAt:        updatedAt,
+		Vhost:            vhost,
 	}, nil
 }
